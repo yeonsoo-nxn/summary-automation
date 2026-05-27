@@ -1,5 +1,7 @@
 import { useState, useRef, useCallback } from "react";
 
+const GROQ_KEY = import.meta.env.VITE_GROQ_API_KEY;
+
 const styles = `
   @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap');
   .wrap { font-family: 'DM Sans', sans-serif; background: #0e0f11; color: #e8eaf0; min-height: 100vh; padding: 24px 20px; font-size: 14px; border-radius: 12px; }
@@ -35,7 +37,11 @@ const styles = `
   .prog-icon { width: 18px; text-align: center; flex-shrink: 0; font-size: 13px; }
   @keyframes spin { to { transform: rotate(360deg); } }
   .spinner { width: 13px; height: 13px; border: 2px solid #2a2d35; border-top-color: #6ee7b7; border-radius: 50%; animation: spin .7s linear infinite; display: inline-block; }
-  .results { display: flex; flex-direction: column; gap: 12px; margin-top: 20px; }
+  .meta-row { display: flex; gap: 8px; margin-top: 16px; margin-bottom: 4px; flex-wrap: wrap; }
+  .meta-pill { font-family: 'DM Mono', monospace; font-size: 11px; padding: 4px 10px; border-radius: 999px; background: #1e2127; border: 1px solid #2a2d35; color: #e8eaf0; }
+  .meta-pill.client { background: rgba(167,139,250,.15); color: #a78bfa; border-color: rgba(167,139,250,.3); }
+  .meta-pill.internal { background: rgba(110,231,183,.15); color: #6ee7b7; border-color: rgba(110,231,183,.3); }
+  .results { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
   .card { background: #16181c; border: 1px solid #2a2d35; border-radius: 10px; overflow: hidden; }
   .card-head { display: flex; align-items: center; gap: 8px; padding: 11px 14px; border-bottom: 1px solid #2a2d35; background: #1e2127; }
   .tag { font-family: 'DM Mono', monospace; font-size: 10px; padding: 2px 7px; border-radius: 4px; font-weight: 500; }
@@ -45,14 +51,21 @@ const styles = `
   .card-title { font-size: 12px; font-weight: 500; color: #6b7280; }
   .card-body { padding: 14px; font-size: 13px; line-height: 1.65; color: #e8eaf0; }
   .card-body.mono { font-family: 'DM Mono', monospace; font-size: 11px; color: #6b7280; max-height: 140px; overflow-y: auto; line-height: 1.7; white-space: pre-wrap; }
+  .point-row { padding: 8px 0; border-bottom: 1px solid #2a2d35; }
+  .point-row:last-child { border-bottom: none; }
+  .point-topic { font-weight: 600; color: #e8eaf0; margin-bottom: 2px; font-size: 13px; }
+  .point-desc { color: #b0b3bd; font-size: 12px; line-height: 1.5; }
   .ai-row { display: flex; align-items: flex-start; gap: 10px; padding: 8px 0; border-bottom: 1px solid #2a2d35; }
   .ai-row:last-child { border-bottom: none; }
-  .ai-person { font-family: 'DM Mono', monospace; font-size: 11px; background: rgba(167,139,250,.15); color: #a78bfa; padding: 2px 7px; border-radius: 4px; white-space: nowrap; flex-shrink: 0; margin-top: 2px; }
+  .ai-person { font-family: 'DM Mono', monospace; font-size: 11px; padding: 2px 7px; border-radius: 4px; white-space: nowrap; flex-shrink: 0; margin-top: 2px; }
+  .ai-person.tagged { background: rgba(167,139,250,.15); color: #a78bfa; }
+  .ai-person.team { background: rgba(110,231,183,.15); color: #6ee7b7; }
   .ai-task { font-size: 12px; line-height: 1.5; }
   .ai-deadline { font-size: 11px; color: #6b7280; margin-top: 2px; font-family: 'DM Mono', monospace; }
   .post-row { display: flex; gap: 8px; margin-top: 12px; }
   .post-row .btn { margin-top: 0; }
   .err { background: rgba(248,113,113,.1); border: 1px solid rgba(248,113,113,.3); border-radius: 10px; padding: 12px 14px; font-size: 12px; color: #f87171; margin-top: 12px; line-height: 1.5; }
+  .empty { color: #6b7280; font-size: 12px; font-style: italic; }
 `;
 
 export default function MeetingAutomation() {
@@ -82,14 +95,6 @@ export default function MeetingAutomation() {
     handleFile(e.dataTransfer.files[0]);
   };
 
-  const toBase64 = (file) =>
-    new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result.split(",")[1]);
-      reader.onerror = reject;
-      reader.readAsDataURL(file);
-    });
-
   const run = async () => {
     if (!file) return;
     setError("");
@@ -98,46 +103,34 @@ export default function MeetingAutomation() {
     setProgStep(0);
 
     try {
-      // Convert file to base64 and send to server-side proxy
-      const audioData = await toBase64(file);
-      const r1 = await fetch("/api/transcribe", {
+      // Step 1: Direct call to Groq Whisper (no payload size limit)
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("model", "whisper-large-v3");
+      fd.append("response_format", "text");
+
+      const r1 = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ audioData, filename: file.name }),
+        headers: { Authorization: "Bearer " + GROQ_KEY },
+        body: fd,
       });
       if (!r1.ok) throw new Error("Transcription failed: " + (await r1.text()));
       const transcript = await r1.text();
 
-      // Claude summarization
+      // Step 2: Server-side summarization via /api/summarize
       setProgStep(1);
-      const r2 = await fetch("https://api.anthropic.com/v1/messages", {
+      const r2 = await fetch("/api/summarize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 1000,
-          messages: [
-            {
-              role: "user",
-              content: `Analyze this meeting transcript. Return ONLY a valid JSON object, no markdown, no extra text.
-
-Meeting title: ${title || "Meeting"}
-Transcript: ${transcript}
-
-{"brief_summary":"3-5 sentence Slack summary","action_items":[{"person":"Name","task":"task description","deadline":"deadline or null"}],"full_summary":"3-4 paragraph detailed summary for Notion","participants":["Name1","Name2"]}`,
-            },
-          ],
-        }),
+        body: JSON.stringify({ title: title || "Meeting", transcript }),
       });
-      if (!r2.ok) throw new Error("Summarization failed: " + r2.status);
+      if (!r2.ok) throw new Error("Summarization failed: " + (await r2.text()));
       const d2 = await r2.json();
-      const parsed = JSON.parse(
-        d2.content[0].text.replace(/```json|```/g, "").trim()
-      );
+      const parsed = JSON.parse(d2.result);
 
       setProgStep(2);
       setTimeout(() => {
-        setResults({ ...parsed, transcript, title: title || "Meeting" });
+        setResults({ ...parsed, transcript, title: title || "Meeting", filename: file.name });
         setStep(3);
       }, 500);
     } catch (e) {
@@ -150,17 +143,13 @@ Transcript: ${transcript}
   const postAll = () => {
     if (!results) return;
     setPosting(true);
-    sendPrompt(
-      "MEETING_AUTOMATION_POST:" +
-        JSON.stringify({
-          title: results.title,
-          brief_summary: results.brief_summary,
-          action_items: results.action_items,
-          full_summary: results.full_summary,
-          transcript: results.transcript,
-          participants: results.participants,
-        })
-    );
+    if (typeof sendPrompt === "function") {
+      sendPrompt("MEETING_AUTOMATION_POST:" + JSON.stringify(results));
+    } else {
+      navigator.clipboard.writeText(JSON.stringify(results, null, 2));
+      alert("Results copied to clipboard. Paste them into Claude chat to post to Slack and Notion.");
+      setPosting(false);
+    }
   };
 
   const reset = () => {
@@ -182,8 +171,8 @@ Transcript: ${transcript}
       <div className="wrap">
         <h1>Meeting Automation</h1>
         <p className="sub">
-          Upload a recording, get a transcript, summary, and action items posted
-          to Slack and Notion automatically.
+          Upload a recording, get a transcript, summary, action items, key decisions,
+          and open questions posted to Slack and Notion automatically.
         </p>
 
         <div className="steps">
@@ -199,7 +188,6 @@ Transcript: ${transcript}
           ))}
         </div>
 
-        {/* Upload screen */}
         {!results && progStep < 0 && (
           <>
             <div
@@ -252,13 +240,12 @@ Transcript: ${transcript}
           </>
         )}
 
-        {/* Progress screen */}
         {progStep >= 0 && !results && (
           <div className="progress-box">
             {[
               "Transcribing audio with Groq Whisper large-v3...",
-              "Generating summary and action items with Claude...",
-              "Results ready — preparing output...",
+              "Analyzing transcript with Llama 3.3 70B...",
+              "Results ready, preparing output...",
             ].map((label, i) => (
               <div
                 key={i}
@@ -281,17 +268,50 @@ Transcript: ${transcript}
           </div>
         )}
 
-        {/* Results screen */}
         {results && (
           <>
+            <div className="meta-row">
+              <span className={`meta-pill ${results.meeting_type || ''}`}>
+                {(results.meeting_type || 'meeting').toUpperCase()}
+                {results.client_company ? ` · ${results.client_company}` : ''}
+              </span>
+              <span className="meta-pill">
+                {(results.language || 'en').toUpperCase()}
+              </span>
+              {results.participants && results.participants.length > 0 && (
+                <span className="meta-pill">
+                  {results.participants.length} participants
+                </span>
+              )}
+            </div>
+
             <div className="results">
               <div className="card">
                 <div className="card-head">
                   <span className="tag tag-slack">SLACK</span>
                   <span className="card-title">Brief summary</span>
                 </div>
-                <div className="card-body">{results.brief_summary}</div>
+                <div className="card-body">
+                  {results.brief_summary || <span className="empty">No summary generated</span>}
+                </div>
               </div>
+
+              {results.summary_points && results.summary_points.length > 0 && (
+                <div className="card">
+                  <div className="card-head">
+                    <span className="tag tag-notion">NOTION</span>
+                    <span className="card-title">Summary points</span>
+                  </div>
+                  <div className="card-body">
+                    {results.summary_points.map((p, i) => (
+                      <div key={i} className="point-row">
+                        <div className="point-topic">{p.topic}</div>
+                        <div className="point-desc">{p.description}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               <div className="card">
                 <div className="card-head">
@@ -299,31 +319,59 @@ Transcript: ${transcript}
                   <span className="card-title">Action items</span>
                 </div>
                 <div className="card-body">
-                  {(results.action_items || []).map((item, i) => (
-                    <div key={i} className="ai-row">
-                      <span className="ai-person">
-                        {item.person || "TBD"}
-                      </span>
-                      <div>
-                        <div className="ai-task">{item.task}</div>
-                        {item.deadline && (
-                          <div className="ai-deadline">
-                            Due: {item.deadline}
-                          </div>
-                        )}
+                  {(results.action_items || []).length === 0 ? (
+                    <span className="empty">No action items</span>
+                  ) : (
+                    (results.action_items || []).map((item, i) => (
+                      <div key={i} className="ai-row">
+                        <span className={`ai-person ${item.slack_id ? 'tagged' : 'team'}`}>
+                          {item.person_display || "Team"}
+                        </span>
+                        <div>
+                          <div className="ai-task">{item.task}</div>
+                          {item.deadline && (
+                            <div className="ai-deadline">Due: {item.deadline}</div>
+                          )}
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    ))
+                  )}
                 </div>
               </div>
 
-              <div className="card">
-                <div className="card-head">
-                  <span className="tag tag-notion">NOTION</span>
-                  <span className="card-title">Full meeting summary</span>
+              {results.key_decisions && results.key_decisions.length > 0 && (
+                <div className="card">
+                  <div className="card-head">
+                    <span className="tag tag-notion">NOTION</span>
+                    <span className="card-title">Key decisions</span>
+                  </div>
+                  <div className="card-body">
+                    {results.key_decisions.map((p, i) => (
+                      <div key={i} className="point-row">
+                        <div className="point-topic">{p.topic}</div>
+                        <div className="point-desc">{p.description}</div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-                <div className="card-body">{results.full_summary}</div>
-              </div>
+              )}
+
+              {results.open_questions && results.open_questions.length > 0 && (
+                <div className="card">
+                  <div className="card-head">
+                    <span className="tag tag-notion">NOTION</span>
+                    <span className="card-title">Open questions / follow-ups</span>
+                  </div>
+                  <div className="card-body">
+                    {results.open_questions.map((p, i) => (
+                      <div key={i} className="point-row">
+                        <div className="point-topic">{p.topic}</div>
+                        <div className="point-desc">{p.description}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               <div className="card">
                 <div className="card-head">
@@ -358,3 +406,4 @@ Transcript: ${transcript}
     </>
   );
 }
+
