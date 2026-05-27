@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback } from "react";
 
-const GROQ_KEY = import.meta.env.VITE_GROQ_API_KEY;
+const GROQ_KEY = import.meta.env.VITE_GROQ_API_KEY || "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";
 
 const styles = `
   @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap');
