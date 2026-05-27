@@ -11,7 +11,7 @@ const TEAM_ROSTER = [
 
 const rosterForPrompt = TEAM_ROSTER.map(p => {
   const aliases = [p.english, p.korean, p.nickname].filter(Boolean).join(' / ');
-  return `- ${aliases} (${p.role}) — slack_id: ${p.slack_id}`;
+  return `- ${aliases} (${p.role}) -> slack_id: ${p.slack_id}`;
 }).join('\n');
 
 export const config = {
@@ -34,40 +34,44 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'Missing transcript' });
     }
 
-    const systemPrompt = `You are an expert meeting analyst for NXN Labs, an AI-powered fashion production company based in Korea. Your job is to analyze meeting transcripts and produce a structured JSON summary.
+    const systemPrompt = `You are an expert meeting analyst for NXN Labs, an AI-powered fashion production company based in Korea. Analyze meeting transcripts and produce structured JSON.
 
 NXN LABS TEAM ROSTER (these are OUR team members):
 ${rosterForPrompt}
 
-CRITICAL RULES:
-1. LANGUAGE: Detect the dominant language of the transcript. If primarily Korean, write all summary fields in Korean. If primarily English, write in English. Match the language of the original meeting.
+RULES:
+1. LANGUAGE: Detect the dominant language of the transcript. If primarily Korean, write all string values in Korean. If primarily English, write in English. Match the language of the meeting.
 
-2. MEETING TYPE: Determine if this is an "internal" meeting (only NXN Labs team members) or a "client" meeting (NXN Labs meeting with an external company/client).
-   - If CLIENT meeting: identify the client company name. Action items should ONLY be for the NXN Labs side. Do not include action items for the client side.
-   - If INTERNAL meeting: include action items for any team member.
+2. MEETING TYPE: Determine if this is "internal" (only NXN Labs team) or "client" (NXN Labs meeting with external company).
+   - For CLIENT meetings: identify the client company name. Action items should ONLY be for the NXN Labs side, not for the client side.
+   - For INTERNAL meetings: include action items for any team member mentioned.
 
 3. ACTION ITEMS: For each action item:
-   - Match the assigned person to the NXN Labs roster above using ANY of their names (English, Korean, or nickname)
-   - If matched, set "slack_id" to their Slack ID and "is_team_member" to true
-   - If the action item is for the team in general (no specific person), set "person_display" to "Team" and "slack_id" to null
-   - If the meeting is internal and no specific person is named, default to "Team"
-   - Format deadlines naturally (e.g., "ASAP", "1주 내", "2026-04-15")
+   - Match the assigned person to the team roster above using any of their names (English, Korean, or nickname)
+   - If matched: set "slack_id" to their Slack ID and "is_team_member" to true
+   - If no specific person is named or it's a general team task: set "person_display" to "Team" or "NXN Labs", "slack_id" to null, "is_team_member" to false
 
-4. STRUCTURE: Use rich, descriptive bullet points with **bold topic headers** followed by detailed explanations (matching the style of professional meeting notes).
+4. CRITICAL JSON FORMATTING RULES:
+   - All string values MUST be valid JSON strings wrapped in double quotes
+   - DO NOT use markdown formatting like **bold** or *italic* inside string values
+   - Write topic and description as plain text only, no asterisks, no special formatting
+   - Example of CORRECT: "topic": "Introduction to the company"
+   - Example of WRONG: "topic": **Introduction** (this is invalid JSON)
+   - Example of WRONG: "topic": "**Introduction**" (no asterisks in content)
 
-Return ONLY a valid JSON object with this exact schema:
+Return ONLY valid JSON matching this exact schema:
 {
   "language": "ko" or "en",
   "meeting_type": "internal" or "client",
-  "client_company": "name of client company if client meeting, otherwise null",
+  "client_company": "name of client if client meeting, otherwise null",
   "participants": ["Name1", "Name2"],
-  "brief_summary": "3-5 sentence concise summary for Slack",
+  "brief_summary": "3-5 sentence concise summary",
   "summary_points": [
-    {"topic": "Bold topic header", "description": "Detailed 1-2 sentence description"}
+    {"topic": "Plain text topic header", "description": "Detailed 1-2 sentence description"}
   ],
   "action_items": [
     {
-      "person_display": "Display name (e.g., 'Dokyun (Jake)' or 'Team' or 'NXN Labs')",
+      "person_display": "Display name or Team or NXN Labs",
       "slack_id": "U06JVRP030Q or null",
       "is_team_member": true or false,
       "task": "task description",
@@ -75,19 +79,21 @@ Return ONLY a valid JSON object with this exact schema:
     }
   ],
   "key_decisions": [
-    {"topic": "Bold topic header", "description": "Detailed description"}
+    {"topic": "Plain text topic header", "description": "Detailed description"}
   ],
   "open_questions": [
-    {"topic": "Bold topic header", "description": "Detailed description"}
+    {"topic": "Plain text topic header", "description": "Detailed description"}
   ]
-}`;
+}
+
+All topic and description values must be plain strings without any markdown syntax.`;
 
     const userPrompt = `Meeting Title: ${title || 'Meeting'}
 
 Transcript:
 ${transcript}
 
-Analyze the above meeting transcript and return the structured JSON summary.`;
+Analyze and return the structured JSON summary. Remember: NO markdown formatting like ** in any string value.`;
 
     const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
@@ -102,7 +108,7 @@ Analyze the above meeting transcript and return the structured JSON summary.`;
           { role: 'user', content: userPrompt },
         ],
         response_format: { type: 'json_object' },
-        temperature: 0.3,
+        temperature: 0.2,
         max_tokens: 4000,
       }),
     });
@@ -113,9 +119,21 @@ Analyze the above meeting transcript and return the structured JSON summary.`;
     }
 
     const data = await response.json();
-    res.status(200).json({ result: data.choices[0].message.content });
+    let result = data.choices[0].message.content;
+
+    // Defensive cleanup: strip any stray markdown asterisks that might break JSON
+    // This handles cases where the model still slips in **text** patterns
+    try {
+      JSON.parse(result);
+    } catch (e) {
+      // Try to fix common issues: unquoted **bold** in values
+      result = result.replace(/:\s*\*\*([^*]+)\*\*/g, ': "$1"');
+      // Remove stray ** inside already-quoted strings
+      result = result.replace(/"([^"]*?)\*\*([^"]*?)\*\*([^"]*?)"/g, '"$1$2$3"');
+    }
+
+    res.status(200).json({ result });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 }
-
