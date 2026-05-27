@@ -1,5 +1,7 @@
 import { useState, useRef, useCallback } from "react";
 
+const GROQ_KEY = import.meta.env.VITE_GROQ_API_KEY;
+
 const styles = `
   @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap');
   .wrap { font-family: 'DM Sans', sans-serif; background: #0e0f11; color: #e8eaf0; min-height: 100vh; padding: 24px 20px; font-size: 14px; border-radius: 12px; }
@@ -82,14 +84,6 @@ export default function MeetingAutomation() {
     handleFile(e.dataTransfer.files[0]);
   };
 
-  const toBase64 = (file) =>
-    new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result.split(",")[1]);
-      reader.onerror = reject;
-      reader.readAsDataURL(file);
-    });
-
   const run = async () => {
     if (!file) return;
     setError("");
@@ -98,17 +92,21 @@ export default function MeetingAutomation() {
     setProgStep(0);
 
     try {
-      // Step 1: Transcribe via /api/transcribe (proxies to Groq Whisper)
-      const audioData = await toBase64(file);
-      const r1 = await fetch("/api/transcribe", {
+      // Step 1: Call Groq Whisper directly from browser (no payload size limit)
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("model", "whisper-large-v3");
+      fd.append("response_format", "text");
+
+      const r1 = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ audioData, filename: file.name }),
+        headers: { Authorization: "Bearer " + GROQ_KEY },
+        body: fd,
       });
       if (!r1.ok) throw new Error("Transcription failed: " + (await r1.text()));
       const transcript = await r1.text();
 
-      // Step 2: Summarize via /api/summarize (proxies to Groq Llama 3.3 70B)
+      // Step 2: Summarize via /api/summarize (server-side proxy to Groq Llama)
       setProgStep(1);
       const r2 = await fetch("/api/summarize", {
         method: "POST",
