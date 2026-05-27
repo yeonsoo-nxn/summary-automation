@@ -1,7 +1,5 @@
 import { useState, useRef, useCallback } from "react";
 
-const GROQ_KEY = import.meta.env.VITE_GROQ_API_KEY;
-
 const styles = `
   @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap');
   .wrap { font-family: 'DM Sans', sans-serif; background: #0e0f11; color: #e8eaf0; min-height: 100vh; padding: 24px 20px; font-size: 14px; border-radius: 12px; }
@@ -84,6 +82,14 @@ export default function MeetingAutomation() {
     handleFile(e.dataTransfer.files[0]);
   };
 
+  const toBase64 = (file) =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result.split(",")[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+
   const run = async () => {
     if (!file) return;
     setError("");
@@ -92,30 +98,42 @@ export default function MeetingAutomation() {
     setProgStep(0);
 
     try {
-      // Step 1: Call Groq Whisper directly from browser (no payload size limit)
-      const fd = new FormData();
-      fd.append("file", file);
-      fd.append("model", "whisper-large-v3");
-      fd.append("response_format", "text");
-
-      const r1 = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+      // Convert file to base64 and send to server-side proxy
+      const audioData = await toBase64(file);
+      const r1 = await fetch("/api/transcribe", {
         method: "POST",
-        headers: { Authorization: "Bearer " + GROQ_KEY },
-        body: fd,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ audioData, filename: file.name }),
       });
       if (!r1.ok) throw new Error("Transcription failed: " + (await r1.text()));
       const transcript = await r1.text();
 
-      // Step 2: Summarize via /api/summarize (server-side proxy to Groq Llama)
+      // Claude summarization
       setProgStep(1);
-      const r2 = await fetch("/api/summarize", {
+      const r2 = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: title || "Meeting", transcript }),
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 1000,
+          messages: [
+            {
+              role: "user",
+              content: `Analyze this meeting transcript. Return ONLY a valid JSON object, no markdown, no extra text.
+
+Meeting title: ${title || "Meeting"}
+Transcript: ${transcript}
+
+{"brief_summary":"3-5 sentence Slack summary","action_items":[{"person":"Name","task":"task description","deadline":"deadline or null"}],"full_summary":"3-4 paragraph detailed summary for Notion","participants":["Name1","Name2"]}`,
+            },
+          ],
+        }),
       });
-      if (!r2.ok) throw new Error("Summarization failed: " + (await r2.text()));
+      if (!r2.ok) throw new Error("Summarization failed: " + r2.status);
       const d2 = await r2.json();
-      const parsed = JSON.parse(d2.result);
+      const parsed = JSON.parse(
+        d2.content[0].text.replace(/```json|```/g, "").trim()
+      );
 
       setProgStep(2);
       setTimeout(() => {
@@ -132,23 +150,17 @@ export default function MeetingAutomation() {
   const postAll = () => {
     if (!results) return;
     setPosting(true);
-    if (typeof sendPrompt === "function") {
-      sendPrompt(
-        "MEETING_AUTOMATION_POST:" +
-          JSON.stringify({
-            title: results.title,
-            brief_summary: results.brief_summary,
-            action_items: results.action_items,
-            full_summary: results.full_summary,
-            transcript: results.transcript,
-            participants: results.participants,
-          })
-      );
-    } else {
-      navigator.clipboard.writeText(JSON.stringify(results, null, 2));
-      alert("Results copied to clipboard. Paste them into Claude chat to post to Slack and Notion.");
-      setPosting(false);
-    }
+    sendPrompt(
+      "MEETING_AUTOMATION_POST:" +
+        JSON.stringify({
+          title: results.title,
+          brief_summary: results.brief_summary,
+          action_items: results.action_items,
+          full_summary: results.full_summary,
+          transcript: results.transcript,
+          participants: results.participants,
+        })
+    );
   };
 
   const reset = () => {
@@ -187,6 +199,7 @@ export default function MeetingAutomation() {
           ))}
         </div>
 
+        {/* Upload screen */}
         {!results && progStep < 0 && (
           <>
             <div
@@ -239,12 +252,13 @@ export default function MeetingAutomation() {
           </>
         )}
 
+        {/* Progress screen */}
         {progStep >= 0 && !results && (
           <div className="progress-box">
             {[
               "Transcribing audio with Groq Whisper large-v3...",
-              "Generating summary and action items with Llama 3.3 70B...",
-              "Results ready, preparing output...",
+              "Generating summary and action items with Claude...",
+              "Results ready — preparing output...",
             ].map((label, i) => (
               <div
                 key={i}
@@ -267,6 +281,7 @@ export default function MeetingAutomation() {
           </div>
         )}
 
+        {/* Results screen */}
         {results && (
           <>
             <div className="results">
@@ -343,4 +358,3 @@ export default function MeetingAutomation() {
     </>
   );
 }
-
