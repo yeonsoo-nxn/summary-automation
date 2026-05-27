@@ -1,7 +1,5 @@
 import { useState, useRef, useCallback } from "react";
 
-const GROQ_KEY = import.meta.env.VITE_GROQ_API_KEY || "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";
-
 const styles = `
   @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap');
   .wrap { font-family: 'DM Sans', sans-serif; background: #0e0f11; color: #e8eaf0; min-height: 100vh; padding: 24px 20px; font-size: 14px; border-radius: 12px; }
@@ -14,8 +12,8 @@ const styles = `
   .step.done { color: #6ee7b7; opacity: .6; }
   .drop-zone { border: 1.5px dashed #2a2d35; border-radius: 10px; padding: 32px 24px; text-align: center; cursor: pointer; transition: all .2s; background: #16181c; position: relative; }
   .drop-zone.drag, .drop-zone:hover { border-color: #6ee7b7; background: rgba(110,231,183,.04); }
-  .drop-zone input { position:absolute; inset:0; opacity:0; cursor:pointer; width:100%; height:100%; }
-  .drop-icon { font-size: 28px; margin-bottom: 10px; display: block; }
+  .drop-zone input { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; }
+  .drop-icon { font-size: 28px; margin-bottom: 10px; display: block; color: #6b7280; }
   .drop-label { font-size: 13px; color: #6b7280; }
   .drop-label strong { color: #e8eaf0; }
   .file-badge { display: inline-flex; align-items: center; gap: 8px; background: #1e2127; border: 1px solid #2a2d35; border-radius: 6px; padding: 8px 12px; margin-top: 12px; font-size: 12px; font-family: 'DM Mono', monospace; }
@@ -55,7 +53,6 @@ const styles = `
   .post-row { display: flex; gap: 8px; margin-top: 12px; }
   .post-row .btn { margin-top: 0; }
   .err { background: rgba(248,113,113,.1); border: 1px solid rgba(248,113,113,.3); border-radius: 10px; padding: 12px 14px; font-size: 12px; color: #f87171; margin-top: 12px; line-height: 1.5; }
-  .empty { color: #6b7280; font-size: 12px; font-style: italic; }
 `;
 
 export default function MeetingAutomation() {
@@ -73,58 +70,54 @@ export default function MeetingAutomation() {
     if (!f) return;
     setFile(f);
     setTitle(f.name.replace(/\.[^/.]+$/, "").replace(/[-_]/g, " "));
-    setStep(1); setError(""); setResults(null);
+    setStep(1);
+    setError("");
+    setResults(null);
   }, []);
 
-  const onInputChange = e => handleFile(e.target.files[0]);
-  const onDrop = e => { e.preventDefault(); setDrag(false); handleFile(e.dataTransfer.files[0]); };
+  const onInputChange = (e) => handleFile(e.target.files[0]);
+  const onDrop = (e) => {
+    e.preventDefault();
+    setDrag(false);
+    handleFile(e.dataTransfer.files[0]);
+  };
+
+  const toBase64 = (file) =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result.split(",")[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
 
   const run = async () => {
     if (!file) return;
-    setError(""); setResults(null); setStep(2); setProgStep(0);
-    try {
-      // Groq Whisper transcription
-      const fd = new FormData();
-      fd.append("file", file);
-      fd.append("model", "whisper-large-v3");
-      fd.append("response_format", "text");
-      const r1 = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
-        method: "POST",
-        headers: { Authorization: "Bearer " + GROQ_KEY },
-        body: fd
-      });
-      if (!r1.ok) throw new Error("Groq transcription failed: " + await r1.text());
-      const transcript = await r1.text();
+    setError("");
+    setResults(null);
+    setStep(2);
+    setProgStep(0);
 
-      // Claude summarization
-      setProgStep(1);
-      const r2 = await fetch("https://api.anthropic.com/v1/messages", {
+    try {
+      // Step 1: Transcribe via /api/transcribe (proxies to Groq Whisper)
+      const audioData = await toBase64(file);
+      const r1 = await fetch("/api/transcribe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 1000,
-          messages: [{
-            role: "user",
-            content: `Analyze this meeting transcript. Return ONLY a valid JSON object, no markdown, no extra text.
-
-Meeting title: ${title || "Meeting"}
-Transcript: ${transcript}
-
-Required JSON format:
-{
-  "brief_summary": "3-5 sentence summary for Slack",
-  "action_items": [{"person": "Name", "task": "task description", "deadline": "deadline or null"}],
-  "full_summary": "3-4 paragraph detailed summary for Notion",
-  "participants": ["Name1", "Name2"]
-}`
-          }]
-        })
+        body: JSON.stringify({ audioData, filename: file.name }),
       });
-      if (!r2.ok) throw new Error("Claude summarization failed: " + r2.status);
+      if (!r1.ok) throw new Error("Transcription failed: " + (await r1.text()));
+      const transcript = await r1.text();
+
+      // Step 2: Summarize via /api/summarize (proxies to Groq Llama 3.3 70B)
+      setProgStep(1);
+      const r2 = await fetch("/api/summarize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: title || "Meeting", transcript }),
+      });
+      if (!r2.ok) throw new Error("Summarization failed: " + (await r2.text()));
       const d2 = await r2.json();
-      const cleaned = d2.content[0].text.replace(/```json|```/g, "").trim();
-      const parsed = JSON.parse(cleaned);
+      const parsed = JSON.parse(d2.result);
 
       setProgStep(2);
       setTimeout(() => {
@@ -133,26 +126,41 @@ Required JSON format:
       }, 500);
     } catch (e) {
       setError(e.message);
-      setStep(1); setProgStep(-1);
+      setStep(1);
+      setProgStep(-1);
     }
   };
 
   const postAll = () => {
     if (!results) return;
     setPosting(true);
-    sendPrompt("MEETING_AUTOMATION_POST:" + JSON.stringify({
-      title: results.title,
-      brief_summary: results.brief_summary,
-      action_items: results.action_items,
-      full_summary: results.full_summary,
-      transcript: results.transcript,
-      participants: results.participants
-    }));
+    if (typeof sendPrompt === "function") {
+      sendPrompt(
+        "MEETING_AUTOMATION_POST:" +
+          JSON.stringify({
+            title: results.title,
+            brief_summary: results.brief_summary,
+            action_items: results.action_items,
+            full_summary: results.full_summary,
+            transcript: results.transcript,
+            participants: results.participants,
+          })
+      );
+    } else {
+      navigator.clipboard.writeText(JSON.stringify(results, null, 2));
+      alert("Results copied to clipboard. Paste them into Claude chat to post to Slack and Notion.");
+      setPosting(false);
+    }
   };
 
   const reset = () => {
-    setFile(null); setTitle(""); setStep(1); setProgStep(-1);
-    setResults(null); setError(""); setPosting(false);
+    setFile(null);
+    setTitle("");
+    setStep(1);
+    setProgStep(-1);
+    setResults(null);
+    setError("");
+    setPosting(false);
     if (inputRef.current) inputRef.current.value = "";
   };
 
@@ -162,29 +170,47 @@ Required JSON format:
     <>
       <style>{styles}</style>
       <div className="wrap">
-        <h1>🎙️ Meeting Automation</h1>
-        <p className="sub">Upload → Transcribe (Groq) → Summarize (Claude) → Post to Slack + Notion</p>
+        <h1>Meeting Automation</h1>
+        <p className="sub">
+          Upload a recording, get a transcript, summary, and action items posted
+          to Slack and Notion automatically.
+        </p>
 
         <div className="steps">
           {stepLabels.map((l, i) => (
-            <div key={i} className={`step${step === i+1 ? " active" : step > i+1 ? " done" : ""}`}>{l}</div>
+            <div
+              key={i}
+              className={`step${
+                step === i + 1 ? " active" : step > i + 1 ? " done" : ""
+              }`}
+            >
+              {l}
+            </div>
           ))}
         </div>
 
-        {/* Upload screen */}
         {!results && progStep < 0 && (
           <>
             <div
               className={`drop-zone${drag ? " drag" : ""}`}
-              onDragOver={e => { e.preventDefault(); setDrag(true); }}
+              onDragOver={(e) => {
+                e.preventDefault();
+                setDrag(true);
+              }}
               onDragLeave={() => setDrag(false)}
               onDrop={onDrop}
             >
-              <input ref={inputRef} type="file" accept="audio/*,video/*,.mp3,.mp4,.wav,.m4a,.webm,.ogg" onChange={onInputChange} />
-              <span className="drop-icon">🎵</span>
+              <input
+                ref={inputRef}
+                type="file"
+                accept="audio/*,video/*,.mp3,.mp4,.wav,.m4a,.webm,.ogg"
+                onChange={onInputChange}
+              />
+              <span className="drop-icon">[ + ]</span>
               <div className="drop-label">
-                <strong>Drop your recording here</strong><br />
-                or click to browse · MP3, WAV, M4A, MP4, WEBM
+                <strong>Drop your recording here</strong>
+                <br />
+                or click to browse — MP3, WAV, M4A, MP4, WEBM
               </div>
               {file && (
                 <div className="file-badge">
@@ -198,30 +224,44 @@ Required JSON format:
               <label>Meeting title</label>
               <input
                 value={title}
-                onChange={e => setTitle(e.target.value)}
-                placeholder="e.g. W Concept CEO Meeting — 2026-05-27"
+                onChange={(e) => setTitle(e.target.value)}
+                placeholder="e.g. W Concept CEO Meeting 2026-05-27"
               />
             </div>
 
-            <button className="btn btn-primary" disabled={!file} onClick={run}>
-              ▶&nbsp; Run automation
+            <button
+              className="btn btn-primary"
+              disabled={!file}
+              onClick={run}
+            >
+              Run Automation
             </button>
 
-            {error && <div className="err">❌ {error}</div>}
+            {error && <div className="err">Error: {error}</div>}
           </>
         )}
 
-        {/* Progress screen */}
         {progStep >= 0 && !results && (
           <div className="progress-box">
             {[
-              "Transcribing audio with Groq Whisper large-v3…",
-              "Generating summary and action items with Claude…",
-              "Results ready — preparing output…"
+              "Transcribing audio with Groq Whisper large-v3...",
+              "Generating summary and action items with Llama 3.3 70B...",
+              "Results ready, preparing output...",
             ].map((label, i) => (
-              <div key={i} className={`prog-row${progStep === i ? " active" : progStep > i ? " done" : ""}`}>
+              <div
+                key={i}
+                className={`prog-row${
+                  progStep === i ? " active" : progStep > i ? " done" : ""
+                }`}
+              >
                 <div className="prog-icon">
-                  {progStep > i ? "✓" : progStep === i ? <span className="spinner" /> : "○"}
+                  {progStep > i ? (
+                    "+"
+                  ) : progStep === i ? (
+                    <span className="spinner" />
+                  ) : (
+                    "o"
+                  )}
                 </div>
                 {label}
               </div>
@@ -229,7 +269,6 @@ Required JSON format:
           </div>
         )}
 
-        {/* Results screen */}
         {results && (
           <>
             <div className="results">
@@ -238,7 +277,7 @@ Required JSON format:
                   <span className="tag tag-slack">SLACK</span>
                   <span className="card-title">Brief summary</span>
                 </div>
-                <div className="card-body">{results.brief_summary || <span className="empty">No summary generated</span>}</div>
+                <div className="card-body">{results.brief_summary}</div>
               </div>
 
               <div className="card">
@@ -247,18 +286,21 @@ Required JSON format:
                   <span className="card-title">Action items</span>
                 </div>
                 <div className="card-body">
-                  {(results.action_items || []).length === 0
-                    ? <span className="empty">No action items found</span>
-                    : (results.action_items || []).map((item, i) => (
-                      <div key={i} className="ai-row">
-                        <span className="ai-person">{item.person || "TBD"}</span>
-                        <div>
-                          <div className="ai-task">{item.task}</div>
-                          {item.deadline && <div className="ai-deadline">⏰ {item.deadline}</div>}
-                        </div>
+                  {(results.action_items || []).map((item, i) => (
+                    <div key={i} className="ai-row">
+                      <span className="ai-person">
+                        {item.person || "TBD"}
+                      </span>
+                      <div>
+                        <div className="ai-task">{item.task}</div>
+                        {item.deadline && (
+                          <div className="ai-deadline">
+                            Due: {item.deadline}
+                          </div>
+                        )}
                       </div>
-                    ))
-                  }
+                    </div>
+                  ))}
                 </div>
               </div>
 
@@ -267,7 +309,7 @@ Required JSON format:
                   <span className="tag tag-notion">NOTION</span>
                   <span className="card-title">Full meeting summary</span>
                 </div>
-                <div className="card-body">{results.full_summary || <span className="empty">No summary generated</span>}</div>
+                <div className="card-body">{results.full_summary}</div>
               </div>
 
               <div className="card">
@@ -280,18 +322,27 @@ Required JSON format:
             </div>
 
             <div className="post-row">
-              <button className="btn btn-primary" disabled={posting} onClick={postAll}>
-                {posting ? "⏳ Posting…" : "🚀 Post to Slack + Create Notion Page"}
+              <button
+                className="btn btn-primary"
+                disabled={posting}
+                onClick={postAll}
+              >
+                {posting ? "Posting..." : "Post to Slack + Create Notion Page"}
               </button>
-              <button className="btn btn-secondary" style={{ width: "auto", padding: "12px 20px" }} onClick={reset}>
-                ↺ Reset
+              <button
+                className="btn btn-secondary"
+                style={{ width: "auto", padding: "12px 20px" }}
+                onClick={reset}
+              >
+                Reset
               </button>
             </div>
 
-            {error && <div className="err">❌ {error}</div>}
+            {error && <div className="err">Error: {error}</div>}
           </>
         )}
       </div>
     </>
   );
 }
+
